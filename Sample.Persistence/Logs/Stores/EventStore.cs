@@ -1,8 +1,8 @@
-﻿using Microsoft.Data.SqlClient;
-using Microsoft.EntityFrameworkCore;
+﻿using Newtonsoft.Json;
+using Raven.Client.Documents;
+using Raven.Client.Documents.Linq.Indexing;
 using System;
 using System.Collections.Generic;
-using System.Data;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -11,48 +11,47 @@ using Timeline.Events;
 using Timeline.Identities;
 using Timeline.Utilities;
 
-namespace Sample.Persistence.Logs
+namespace Sample.Persistence.Logs.Stores
 {
     public class EventStore : IEventStore
     {
-        private string DatabaseConnectionString { get; set; }
+        IIdentityService _identityService;
+        readonly IDocumentStore _documentStore;
 
-        private string OfflineStorageFolder { get; set; }
+        public ISerializer Serializer { get; set; }
 
-        private readonly IIdentityService _identityService;
+        public string OfflineStorageFolder { get; set; }
 
-        public ISerializer Serializer { get; private set; }
-
-        public EventStore(IIdentityService identityService, ISerializer serializer, string databaseConnectionString, string offlineStorageFolder)
+        public EventStore(IDocumentStore documentStore, IIdentityService identityService, ISerializer serializer, string offlineStorageFolder)
         {
+            _documentStore = documentStore;
             _identityService = identityService;
             Serializer = serializer;
-            DatabaseConnectionString = databaseConnectionString;
             OfflineStorageFolder = offlineStorageFolder;
         }
 
-        public void Box(Guid aggregate)
+        public void Box(Guid aggregateId)
         {
-            GetClassAndTenant(aggregate, out string aggregateClass, out Guid aggregateTenant);
+            GetClassAndTenant(aggregateId, out string aggregateClass, out Guid aggregateTenant);
 
             // Create a new directory using the aggregate identifier as the folder name.
-            var path = Path.Combine(OfflineStorageFolder, aggregate.ToString());
+            var path = Path.Combine(OfflineStorageFolder, aggregateId.ToString());
             if (!Directory.Exists(path))
                 Directory.CreateDirectory(path);
 
             // Serialize the event stream and write it to an external file.
-            var events = GetSerialized(aggregate, -1);
-            var json = Serializer.Serialize(events);
+            var events = GetSerialzied(aggregateId, -1);
+            var json = JsonConvert.SerializeObject(events);
             var file = Path.Combine(path, "Events.json");
             File.WriteAllText(file, json, Encoding.Unicode);
             var info = new FileInfo(file);
 
             // Delete the aggregate and the events from the online logs.
-            var deleted = Delete(aggregate);
+            var deleted = Delete(aggregateId);
 
             // Create a metadata file to describe the boxed aggregated.
             var meta = new StringBuilder();
-            meta.AppendLine($"Aggregate Identifier : {aggregate}");
+            meta.AppendLine($"Aggregate Identifier : {aggregateId}");
             meta.AppendLine($"     Aggregate Class : {aggregateClass}");
             meta.AppendLine($"    Aggregate Tenant : {aggregateTenant}");
             meta.AppendLine($"  Serialized Events  : {events.Count():n0}");
@@ -64,121 +63,38 @@ namespace Sample.Persistence.Logs
 
             // Write an index entry for the boxed aggregate.
             var index = Path.Combine(OfflineStorageFolder, "Boxes.csv");
-            File.AppendAllText(index, $"{DateTime.Now:yyyy/MM/dd-HH:mm},{aggregate},{aggregateClass},{info.Length / 1024} KB,{aggregateTenant}\n");
+            File.AppendAllText(index, $"{DateTime.Now:yyyy/MM/dd-HH:mm},{aggregateId},{aggregateClass},{info.Length / 1024} KB,{aggregateTenant}\n");
         }
 
-        public bool Exists(Guid aggregate)
+        public bool Exists(Guid aggregateIdentifier)
         {
-            const string query = @"SELECT TOP 1 1 FROM logs.Aggregate WHERE AggregateIdentifier = @AggregateIdentifier";
-
-            using (var connection = new SqlConnection(DatabaseConnectionString))
-            {
-                connection.Open();
-                using (var select = new SqlCommand(query, connection))
-                {
-                    select.Parameters.AddWithValue("AggregateIdentifier", aggregate);
-                    object o = select.ExecuteScalar();
-                    return o != DBNull.Value;
-                }
-            }
+            using var session = _documentStore.OpenSession();
+            return session.Query<Aggregate>().Any(a => a.AggregateIdentifier == aggregateIdentifier);
         }
 
-        public bool Exists(Guid aggregate, int version)
+        public bool Exists(Guid aggregateIdentifier, int version)
         {
-            const string query = @"SELECT TOP 1 1 FROM logs.Aggregate WHERE AggregateIdentifier = @AggregateIdentifier AND AggregateVersion = @AggregateVersion";
-
-            using (var connection = new SqlConnection(DatabaseConnectionString))
-            {
-                connection.Open();
-                using (var select = new SqlCommand(query, connection))
-                {
-                    select.Parameters.AddWithValue("AggregateIdentifier", aggregate);
-                    select.Parameters.AddWithValue("AggregateVersion", version);
-                    object o = select.ExecuteScalar();
-                    return o != DBNull.Value;
-                }
-            }
+            //using var session = _documentStore.OpenSession();
+            //return session.Query<Aggregate>().Any(a => a.AggregateIdentifier == aggregateIdentifier && a.AggregateVersion == version);
+            return false;
         }
 
         public IEnumerable<IEvent> Get(Guid aggregate, int fromVersion)
         {
-            return GetSerialized(aggregate, fromVersion)
-                .Select(x => x.Deserialize(Serializer))
+            using var session = _documentStore.OpenSession();
+            return session.Query<Event>()
+                .Where(e => e.AggregateIdentifier == aggregate && e.AggregateVersion > fromVersion)
                 .ToList()
                 .AsEnumerable();
         }
 
         public IEnumerable<Guid> GetExpired(DateTimeOffset at)
         {
-            using (var db = new LogDbContext(DatabaseConnectionString))
-            {
-                return db.Aggregates
-                    .AsNoTracking()
-                    .Where(x => x.AggregateExpires != null && x.AggregateExpires <= at)
-                    .Select(x => x.AggregateIdentifier)
-                    .ToList();
-            }
-        }
-
-        private IEnumerable<SerializedEvent> GetSerialized(Guid aggregate, int fromVersion)
-        {
-            const string text = @"
-SELECT 
-    AggregateIdentifier,
-    AggregateVersion,
-    EventTime,
-    EventClass,
-    EventType,
-    EventData,
-    IdentityTenant,
-    IdentityUser
-FROM 
-    logs.Event 
-WHERE
-    AggregateIdentifier = @AggregateIdentifier AND AggregateVersion > @AggregateVersion
-ORDER BY
-    AggregateVersion";
-
-            using (var connection = new SqlConnection(DatabaseConnectionString))
-            {
-                connection.Open();
-
-                using (var command = new SqlCommand(text, connection))
-                {
-                    command.Parameters.AddWithValue("AggregateIdentifier", aggregate);
-                    command.Parameters.AddWithValue("AggregateVersion", fromVersion);
-
-                    using (var reader = command.ExecuteReader())
-                    {
-                        var list = new List<SerializedEvent>();
-
-                        while (reader.Read())
-                        {
-                            var item = new SerializedEvent
-                            {
-                                AggregateIdentifier = reader.GetGuid(0),
-                                AggregateVersion = reader.GetInt32(1),
-                                EventTime = reader.GetDateTimeOffset(2),
-                                EventClass = reader.GetString(3),
-                                EventType = reader.GetString(4),
-                                EventData = reader.GetString(5),
-                                IdentityTenant = reader.GetGuid(6),
-                                IdentityUser = reader.GetGuid(7)
-                            };
-                            list.Add(item);
-                        }
-
-                        return list;
-                    }
-                }
-            }
-        }
-
-        public IEvent Last(Guid aggregate)
-        {
-            return GetSerialized(aggregate, -1)
-                .Last()
-                .Deserialize(Serializer);
+            using var sessin = _documentStore.OpenSession();
+            return sessin.Query<Aggregate>()
+                .Where(x => x.AggregateExpires != null && x.AggregateExpires <= at)
+                .Select(x => x.AggregateIdentifier)
+                .ToList();
         }
 
         public void Save(IAggregateRoot aggregate, IEnumerable<IEvent> events)
@@ -187,177 +103,76 @@ ORDER BY
             var tenant = current.Tenant.Identifier;
             var user = current.User.Identifier;
 
-            var list = new List<SerializedEvent>();
-
-            foreach (var e in events)
+            var session = _documentStore.OpenSession();
+            foreach (var @event in events)
             {
-                var item = e.Serialize(Serializer, aggregate.AggregateIdentifier, e.AggregateVersion, tenant, user);
+                EnsureAggregateExists(tenant, aggregate.AggregateIdentifier, aggregate.GetType().Name.Replace("Aggregate", string.Empty), aggregate.GetType().FullName);
 
+                @event.IdentityTenant = tenant;
+                @event.IdentityUser = user;
+
+                session.Store(@event);
+            }
+
+            session.SaveChanges();
+        }
+
+        private void EnsureAggregateExists(Guid tenant, Guid aggregateId, string name, string type)
+        {
+            using var session = _documentStore.OpenSession();
+            if (!session.Query<Aggregate>().Any(a => a.AggregateIdentifier == aggregateId))
+            {
+                var aggregate = new Aggregate()
+                {
+                    AggregateIdentifier = aggregateId,
+                    AggregateClass = type,
+                    AggregateType = name,
+                    TenantIdentifier = tenant
+                };
+
+                session.Store(aggregate);
+                session.SaveChanges();
+            }
+        }
+
+        private IEnumerable<SerializedEvent> GetSerialzied(Guid aggregateIdentifier, int fromVersion)
+        {
+            var events = Get(aggregateIdentifier, fromVersion);
+
+            var list = new List<SerializedEvent>();
+            foreach (var @event in events)
+            {
+                var item = @event.Serialize(Serializer, aggregateIdentifier, @event.AggregateVersion, @event.IdentityTenant, @event.IdentityUser);
                 list.Add(item);
             }
 
-            using (var connection = new SqlConnection(DatabaseConnectionString))
-            {
-                connection.Open();
-
-                using (var transaction = connection.BeginTransaction())
-                {
-                    EnsureAggregateExists(tenant, aggregate.AggregateIdentifier, aggregate.GetType().Name.Replace("Aggregate", string.Empty), aggregate.GetType().FullName, connection, transaction);
-
-                    if (list.Count > 1)
-                        InsertEvents(list, connection, transaction);
-                    else
-                        InsertEvent(list[0], connection, transaction);
-
-                    transaction.Commit();
-                }
-            }
+            return list;
         }
 
-        #region Methods (insert, update, delete)
-
-        private int Delete(Guid aggregate)
+        private int Delete(Guid aggregateIdentifier)
         {
-            const string query = @"
-DELETE FROM logs.Aggregate WHERE AggregateIdentifier = @AggregateIdentifier;
-DELETE FROM logs.Event WHERE AggregateIdentifier = @AggregateIdentifier;
-";
+            using var session = _documentStore.OpenSession();
 
-            using (var connection = new SqlConnection(DatabaseConnectionString))
+            var aggregate = session.Query<Aggregate>().FirstOrDefault(e => e.AggregateIdentifier == aggregateIdentifier);
+            session.Delete(aggregate);
+
+            var events = session.Query<Event>().Where(e => e.AggregateIdentifier == aggregateIdentifier);
+            foreach (var @event in events)
             {
-                connection.Open();
-                using (var command = new SqlCommand(query, connection))
-                {
-                    command.Parameters.AddWithValue("AggregateIdentifier", aggregate);
-                    return command.ExecuteNonQuery();
-                }
+                session.Delete(@event);
             }
+
+            session.SaveChanges();
+
+            return events.Count() + 1;
         }
 
-        private void InsertEvent(SerializedEvent e, SqlConnection connection, SqlTransaction transaction)
+        private void GetClassAndTenant(Guid aggregateIdentifier, out string @class, out Guid tenant)
         {
-            const string query = @"
-INSERT INTO logs.Event
-(
-    AggregateIdentifier, AggregateVersion,
-    EventClass, EventType, EventData,
-    IdentityTenant, IdentityUser,
-    EventTime
-)
-VALUES
-( @AggregateIdentifier, @AggregateVersion, @EventClass, @EventType, @EventData, @IdentityTenant, @IdentityUser, @EventTime )";
-
-            using (var command = new SqlCommand(query, connection, transaction))
-            {
-                var parameters = command.Parameters;
-
-                parameters.AddWithValue("AggregateIdentifier", e.AggregateIdentifier);
-                parameters.AddWithValue("AggregateVersion", e.AggregateVersion);
-
-                parameters.AddWithValue("EventClass", e.EventClass);
-                parameters.AddWithValue("EventType", e.EventType);
-                parameters.AddWithValue("EventData", e.EventData);
-
-                parameters.AddWithValue("IdentityTenant", e.IdentityTenant);
-                parameters.AddWithValue("IdentityUser", e.IdentityUser);
-
-                parameters.AddWithValue("EventTime", e.EventTime);
-
-                try
-                {
-                    command.ExecuteNonQuery();
-                }
-                catch (SqlException ex) { throw new SqlInsertException($"The event ({e.EventType}) could not be saved.", ex); }
-            }
+            using var session = _documentStore.OpenSession();
+            var aggregate = session.Query<Aggregate>().FirstOrDefault(a => a.AggregateIdentifier == aggregateIdentifier);
+            tenant = aggregate.TenantIdentifier;
+            @class = aggregate.AggregateClass;
         }
-
-        private void InsertEvents(List<SerializedEvent> events, SqlConnection connection, SqlTransaction transaction)
-        {
-            var table = new DataTable();
-
-            table.Columns.Add("AggregateIdentifier", typeof(Guid));
-            table.Columns.Add("AggregateVersion", typeof(int));
-
-            table.Columns.Add("IdentityTenant", typeof(Guid));
-            table.Columns.Add("IdentityUser", typeof(Guid));
-
-            table.Columns.Add("EventTime", typeof(DateTimeOffset));
-            table.Columns.Add("EventClass", typeof(string));
-            table.Columns.Add("EventType", typeof(string));
-            table.Columns.Add("EventData", typeof(string));
-
-            foreach (var e in events)
-            {
-                var row = table.NewRow();
-                row["AggregateIdentifier"] = e.AggregateIdentifier;
-                row["AggregateVersion"] = e.AggregateVersion;
-                row["IdentityTenant"] = e.IdentityTenant;
-                row["IdentityUser"] = e.IdentityUser;
-                row["EventTime"] = e.EventTime;
-                row["EventClass"] = e.EventClass;
-                row["EventType"] = e.EventType;
-                row["EventData"] = e.EventData;
-                table.Rows.Add(row);
-            }
-
-            using (SqlBulkCopy bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.Default, transaction))
-            {
-                bulkCopy.BatchSize = 5000;
-                bulkCopy.DestinationTableName = "logs.Event";
-                bulkCopy.WriteToServer(table);
-            }
-        }
-
-        #endregion
-
-        #region Methods (lookup)
-
-        private void EnsureAggregateExists(Guid tenant, Guid aggregate, string name, string type, SqlConnection connection, SqlTransaction transaction)
-        {
-            const string query = @"
-IF NOT EXISTS(SELECT TOP 1 1 FROM logs.Aggregate WHERE AggregateIdentifier = @AggregateIdentifier)
-  BEGIN
-    INSERT INTO logs.Aggregate (TenantIdentifier, AggregateIdentifier, AggregateType, AggregateClass) VALUES (@TenantIdentifier, @AggregateIdentifier, @AggregateType, @AggregateClass);
-  END";
-
-            using (var insert = new SqlCommand(query, connection, transaction))
-            {
-                insert.Parameters.AddWithValue("TenantIdentifier", tenant);
-                insert.Parameters.AddWithValue("AggregateIdentifier", aggregate);
-                insert.Parameters.AddWithValue("AggregateType", name);
-                insert.Parameters.AddWithValue("AggregateClass", type);
-
-                insert.ExecuteNonQuery();
-            }
-        }
-
-        private void GetClassAndTenant(Guid aggregate, out string @class, out Guid tenant)
-        {
-            @class = null;
-            tenant = Guid.Empty;
-
-            const string text = @"select AggregateClass, TenantIdentifier from logs.Aggregate where AggregateIdentifier = @AggregateIdentifier";
-
-            using (var connection = new SqlConnection(DatabaseConnectionString))
-            {
-                connection.Open();
-
-                using (var command = new SqlCommand(text, connection))
-                {
-                    command.Parameters.AddWithValue("AggregateIdentifier", aggregate);
-
-                    using (var reader = command.ExecuteReader())
-                    {
-                        if (reader.Read())
-                        {
-                            @class = reader.GetString(0);
-                            tenant = reader.GetGuid(1);
-                        }
-                    }
-                }
-            }
-        }
-
-        #endregion
     }
 }

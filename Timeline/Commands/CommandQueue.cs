@@ -91,11 +91,11 @@ namespace Timeline.Commands
         {
             Identify(command);
 
-            SerializedCommand serialized = null;
+            CommandSchedule serialized = null;
 
             if (_saveAll)
             {
-                serialized = _store.Serialize(command);
+                serialized = new CommandSchedule(command);
                 serialized.SendStarted = DateTimeOffset.UtcNow;
             }
 
@@ -120,7 +120,7 @@ namespace Timeline.Commands
         {
             Identify(command);
 
-            var serialized = _store.Serialize(command);
+            var serialized = new CommandSchedule(command);
             serialized.SendScheduled = at;
             serialized.SendStatus = "Scheduled";
             _store.Save(serialized, true);
@@ -195,17 +195,17 @@ namespace Timeline.Commands
         /// <summary>
         /// Executes the command synchronously.
         /// </summary>
-        private void Execute(SerializedCommand serialized)
+        private void Execute(CommandSchedule commandSchedule)
         {
-            serialized.SendStarted = DateTimeOffset.UtcNow;
-            serialized.SendStatus = "Started";
-            _store.Save(serialized, false);
+            commandSchedule.SendStarted = DateTimeOffset.UtcNow;
+            commandSchedule.SendStatus = "Started";
+            _store.Save(commandSchedule, false);
 
-            Execute(serialized.Deserialize(_store.Serializer), serialized.CommandClass);
+            Execute(commandSchedule.CommandData, commandSchedule.CommandClass);
 
-            serialized.SendCompleted = DateTimeOffset.UtcNow;
-            serialized.SendStatus = "Completed";
-            _store.Save(serialized, false);
+            commandSchedule.SendCompleted = DateTimeOffset.UtcNow;
+            commandSchedule.SendStatus = "Completed";
+            _store.Save(commandSchedule, false);
         }
 
         /// <summary>

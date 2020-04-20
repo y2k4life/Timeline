@@ -90,7 +90,7 @@ namespace Timeline.Snapshots
 
             aggregate.AggregateIdentifier = snapshot.AggregateIdentifier;
             aggregate.AggregateVersion = snapshot.AggregateVersion;
-            aggregate.State = _eventStore.Serializer.Deserialize<AggregateState>(snapshot.AggregateState, aggregate.State.GetType());
+            aggregate.State = snapshot.AggregateState; // _eventStore.Serializer.Deserialize<AggregateState>(snapshot.AggregateState, aggregate.State.GetType());
 
             return snapshot.AggregateVersion;
         }
@@ -107,7 +107,7 @@ namespace Timeline.Snapshots
             {
                 AggregateIdentifier = aggregate.AggregateIdentifier,
                 AggregateVersion = aggregate.AggregateVersion,
-                AggregateState = _eventStore.Serializer.Serialize<AggregateState>(aggregate.State)
+                AggregateState = aggregate.State
             };
 
             snapshot.AggregateVersion = aggregate.AggregateVersion + aggregate.GetUncommittedChanges().Length;
@@ -149,7 +149,7 @@ namespace Timeline.Snapshots
             var aggregate = AggregateFactory<T>.CreateAggregate();
             aggregate.AggregateIdentifier = aggregateId;
             aggregate.AggregateVersion = 1;
-            aggregate.State = _eventStore.Serializer.Deserialize<AggregateState>(snapshot.AggregateState, aggregate.State.GetType());
+            aggregate.State = _eventStore.Serializer.Deserialize<AggregateState>(snapshot, aggregate.State.GetType());
             return aggregate;
         }
 
