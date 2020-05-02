@@ -23,21 +23,16 @@ namespace Timeline.Commands
         /// <summary>
         /// Gets the serialized version of specific command.
         /// </summary>
-        SerializedCommand Get(Guid command);
+        CommandSchedule Get(Guid command);
 
         /// <summary>
         /// Gets all unstarted commands that are scheduled to send now.
         /// </summary>
-        IEnumerable<SerializedCommand> GetExpired(DateTimeOffset at);
+        IEnumerable<CommandSchedule> GetExpired(DateTimeOffset at);
 
         /// <summary>
         /// Saves a serialized command.
         /// </summary>
-        void Save(SerializedCommand command, bool isNew);
-
-        /// <summary>
-        /// Returns the serialized version of a command.
-        /// </summary>
-        SerializedCommand Serialize(ICommand command);
+        void Save(CommandSchedule command, bool isNew);
     }
 }

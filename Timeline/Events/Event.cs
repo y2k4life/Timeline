@@ -36,17 +36,17 @@ namespace Timeline.Events
         /// <summary>
         /// Fully-qualified assembly name for the class that implements the event.
         /// </summary>
-        public string EventClass { get; set; }
+        //public string EventClass { get; set; }
 
         /// <summary>
         /// Abbreviated class name.
         /// </summary>
-        public string EventType { get; set; }
+        //public string EventType { get; set; }
 
         /// <summary>
         /// Serialized data for the event.
         /// </summary>
-        public string EventData { get; set; }
+        //public string EventData { get; set; }
 
         /// <summary>
         /// Date and time the event was raised.

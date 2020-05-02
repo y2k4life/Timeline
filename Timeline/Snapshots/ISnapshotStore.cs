@@ -25,6 +25,6 @@ namespace Timeline.Snapshots
         /// <summary>
         /// Retrieves an aggregate from offline storage and returns only its most recent state.
         /// </summary>
-        Snapshot Unbox(Guid id);
+        string Unbox(Guid aggregateIdentifier);
     }
 }
