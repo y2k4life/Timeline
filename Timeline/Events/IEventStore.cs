@@ -38,7 +38,7 @@ namespace Timeline.Events
         /// <summary>
         /// Save events.
         /// </summary>
-        void Save(AggregateRoot aggregate, IEnumerable<IEvent> events);
+        void Save(IAggregateRoot aggregate, IEnumerable<IEvent> events);
 
         /// <summary>
         /// Copies an aggregate to offline storage and removes it from online logs.

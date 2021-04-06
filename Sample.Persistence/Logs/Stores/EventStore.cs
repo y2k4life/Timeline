@@ -6,7 +6,7 @@ using System.Data;
 using System.IO;
 using System.Linq;
 using System.Text;
-
+using Timeline;
 using Timeline.Events;
 using Timeline.Identities;
 using Timeline.Utilities;
@@ -181,7 +181,7 @@ ORDER BY
                 .Deserialize(Serializer);
         }
 
-        public void Save(AggregateRoot aggregate, IEnumerable<IEvent> events)
+        public void Save(IAggregateRoot aggregate, IEnumerable<IEvent> events)
         {
             var current = _identityService.GetCurrent();
             var tenant = current.Tenant.Identifier;
